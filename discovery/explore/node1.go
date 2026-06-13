@@ -1,20 +1,23 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type Metadata struct {
-	ID        string `json:"id"`
-	PID       int    `json:"pid"`
-	Path      string `json:"path"`
-	Preferred string `json:"preferred"`
+	ID        string   `json:"id"`
+	PID       int      `json:"pid"`
+	Path      string   `json:"path"`
+	Preferred string   `json:"preferred"`
+	Resources []string `json:"resources"`
 }
 
 func main() {
@@ -25,19 +28,16 @@ func main() {
 		PID:       os.Getpid(),
 		Path:      absPath,
 		Preferred: "unix",
+		Resources: []string{"cpu:low", "disk:high"},
 	}
 
-	dump(id, "Starting up. My metadata: %+v", meta)
+	dump(id, "Phase: Initialization. Metadata: %+v", meta)
 
-	// Step 1: Advertise presence
 	discoveryFile := filepath.Join(absPath, id+".discovery")
 	data, _ := json.Marshal(meta)
 	os.WriteFile(discoveryFile, data, 0644)
 	defer os.Remove(discoveryFile)
 
-	dump(id, "Discovery file created: %s", discoveryFile)
-
-	// Step 2: Discovery loop
 	var peerMeta Metadata
 	for {
 		files, _ := os.ReadDir(absPath)
@@ -45,7 +45,7 @@ func main() {
 			if filepath.Ext(f.Name()) == ".discovery" && f.Name() != id+".discovery" {
 				content, _ := os.ReadFile(filepath.Join(absPath, f.Name()))
 				json.Unmarshal(content, &peerMeta)
-				dump(id, "Discovered peer: %s (PID: %d)", peerMeta.ID, peerMeta.PID)
+				dump(id, "Phase: Discovery. Found peer: %s", peerMeta.ID)
 				goto Bargain
 			}
 		}
@@ -53,8 +53,6 @@ func main() {
 	}
 
 Bargain:
-	// Step 3: Negotiate protocol
-	// Simple rule: node with lower ID listens, higher ID dials
 	sockPath := filepath.Join(absPath, "comms.sock")
 	if id < peerMeta.ID {
 		listen(id, sockPath)
@@ -70,38 +68,56 @@ func listen(id, path string) {
 		log.Fatal(err)
 	}
 	defer l.Close()
-	dump(id, "Listening on %s", path)
 
 	conn, err := l.Accept()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer conn.Close()
-	dump(id, "Peer connected. Negotiating...")
 	
-	handle(id, conn)
+	handle(id, conn, true)
 }
 
 func dial(id, path string) {
-	// Wait a bit for listener
 	time.Sleep(2 * time.Second)
-	dump(id, "Dialing %s", path)
 	conn, err := net.Dial("unix", path)
 	if err != nil {
-		dump(id, "Dial failed: %v", err)
 		return
 	}
 	defer conn.Close()
-	dump(id, "Connected to peer.")
 	
-	handle(id, conn)
+	handle(id, conn, false)
 }
 
-func handle(id string, conn net.Conn) {
-	fmt.Fprintf(conn, "Hello from %s\n", id)
-	buf := make([]byte, 1024)
-	n, _ := conn.Read(buf)
-	dump(id, "Received: %s", string(buf[:n]))
+func handle(id string, conn net.Conn, isServer bool) {
+	reader := bufio.NewReader(conn)
+	
+	if !isServer {
+		fmt.Fprintf(conn, "PROPOSE_DUMP:shared_experiment.dump\n")
+		dump(id, "Bargaining: Proposed shared_experiment.dump")
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+		line = strings.TrimSpace(line)
+		
+		if strings.HasPrefix(line, "PROPOSE_DUMP:") {
+			suggestion := strings.Split(line, ":")[1]
+			dump(id, "Bargaining: Peer proposed %s. I accept.", suggestion)
+			fmt.Fprintf(conn, "ACCEPT_DUMP:%s\n", suggestion)
+		} else if strings.HasPrefix(line, "ACCEPT_DUMP:") {
+			agreed := strings.Split(line, ":")[1]
+			dump(id, "Bargaining: Peer accepted %s. Finalizing.", agreed)
+			fmt.Fprintf(conn, "FINALIZED\n")
+			break
+		} else if line == "FINALIZED" {
+			break
+		}
+	}
+	dump(id, "Communication complete.")
 }
 
 func dump(id, format string, v ...interface{}) {
