@@ -10,6 +10,7 @@ The primary objective of this repository is to explore and implement various com
 
 This repository is organized into root-level folders, each representing a specific communication strategy or protocol experiment.
 
+- `discovery/`: Exploration of agent discovery and negotiation.
 - `protocols/`: (Placeholder) Detailed protocol specifications.
 - `experiments/`: (Placeholder) Implementation of various M2M strategies.
 
